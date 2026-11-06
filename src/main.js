@@ -3,6 +3,7 @@ import {
   defaults, valid, normalize, uid, fmt, isActive, roundDone, stats, ranked, nextRound,
   calcPoints, playerLog, roundText, standText, cleanName, parseLine, PACE, splitCourts,
 } from './engine.js';
+import { newLive, publish, fetchLive, stopLive, liveUrl, liveCodeFromUrl } from './live.js';
 
 const KEY = 'padel_scorer_v1';
 const $ = (s) => document.querySelector(s);
@@ -17,16 +18,22 @@ function load() {
   } catch (e) { storageOK = false; }
   return null;
 }
+// Spectator mode (?live=CODE): read-only, state comes from the server, nothing touches localStorage.
+const LIVE = liveCodeFromUrl();
 function save() {
+  if (LIVE) return;
   try { localStorage.setItem(KEY, JSON.stringify(S)); storageOK = true; } catch (e) { storageOK = false; }
+  if (S.live) schedulePublish();
 }
-let S = load() || defaults();
+let S = LIVE ? defaults() : load() || defaults();
 
 const ui = {
   tab: S.status === 'setup' ? 'setup' : 'play', gender: 'M', filter: 'all', confirm: null, ct: null,
   sheet: null, paste: false, openRounds: {}, calc: { dur: 120, pace: 'normal' }, beeped: null,
+  live: { status: 'idle', at: 0 }, // organizer publish status
+  view: { loaded: false, missing: false, at: 0, since: null, failAt: 0 }, // spectator fetch status
 };
-const isDisplay = () => location.hash === '#display';
+const isDisplay = () => !LIVE && location.hash === '#display';
 const P = (id) => S.players.find((p) => p.id === id) || { id, name: '?', g: 'M' };
 const name = (id) => P(id).name;
 
@@ -62,7 +69,7 @@ setInterval(() => {
     box.classList.toggle('low', clockCls(ms) === 'low');
     box.classList.toggle('over', clockCls(ms) === 'over');
   });
-  if (timerRunning() && ms <= 0 && ui.beeped !== S.timer.end) {
+  if (!LIVE && timerRunning() && ms <= 0 && ui.beeped !== S.timer.end) {
     ui.beeped = S.timer.end;
     if (!isDisplay() || !document.hidden) beep();
     toast("Time's up. Finish the point and enter scores");
@@ -142,7 +149,8 @@ const nav = () => `<nav class="tabs">${[['setup', 'Setup'], ['play', 'Play'], ['
 function header() {
   const n = S.rounds.length;
   const sub = [fmtLabel(), S.setup.scoring === 'fixed' ? S.setup.points + ' pts' : `Timed ${S.setup.roundMin} min`, n ? 'Round ' + n : null, S.status === 'finished' ? 'Finished' : null].filter(Boolean).join(' · ');
-  return `<header class="top"><div class="brand"><div class="ball"></div><div style="min-width:0"><h1>${esc(S.setup.name || 'Padel Night')}</h1><div class="sub">${sub}</div></div></div>${nav()}</header>`;
+  const pill = S.live ? `<button class="livepill ${ui.live.status}" data-act="liveOpen" title="Live link">LIVE</button>` : '';
+  return `<header class="top"><div class="brand"><div class="ball"></div><div style="min-width:0"><h1>${esc(S.setup.name || 'Padel Night')} ${pill}</h1><div class="sub">${sub}</div></div></div>${nav()}</header>`;
 }
 function seg(k, opts, cur, locked) {
   return `<div class="seg ${locked ? 'locked' : ''}">${opts.map(([v, l]) => `<button class="${String(cur) === v ? 'on' : ''}" data-act="seg" data-k="${k}" data-v="${v}" ${locked ? 'disabled' : ''}>${l}</button>`).join('')}</div>`;
@@ -230,11 +238,11 @@ function matchCard(ri, mi, m, ro) {
   const tag = S.setup.split ? ` · ${P(m.a[0]).g === 'F' ? 'Women' : 'Men'}` : '';
   return `<div class="match"><div class="mhead"><span>Court ${m.court}${tag}</span>${has ? '<span class="done">Done</span>' : ''}</div>${team(m.a, 'a', m.sa, wa)}<div class="vs">VS</div>${team(m.b, 'b', m.sb, wb)}</div>`;
 }
-function prevRound(i) {
+function prevRound(i, ro) {
   const r = S.rounds[i], open = ui.openRounds[i];
   const sum = r.matches.map((m) => (m.sa == null ? '–' : `${m.sa}–${m.sb}`)).join('  ·  ');
   return `<div class="card pr"><button class="prh" data-act="openR" data-r="${i}" aria-expanded="${!!open}"><b>Round ${i + 1}</b><span class="sub">${sum}</span><span class="chev">${open ? '−' : '+'}</span></button>
-  ${open ? `<div class="prbody"><div class="matches">${r.matches.map((m, mi) => matchCard(i, mi, m)).join('')}</div>${r.byes.length ? `<div class="byes"><span>Sat out</span>${r.byes.map(chipName).join('')}</div>` : ''}<button class="btn ghost sm" style="margin-top:12px" data-act="copyRound" data-r="${i}">Copy round</button></div>` : ''}</div>`;
+  ${open ? `<div class="prbody"><div class="matches">${r.matches.map((m, mi) => matchCard(i, mi, m, ro)).join('')}</div>${r.byes.length ? `<div class="byes"><span>Sat out</span>${r.byes.map(chipName).join('')}</div>` : ''}<button class="btn ghost sm" style="margin-top:12px" data-act="copyRound" data-r="${i}">Copy round</button></div>` : ''}</div>`;
 }
 function timerBox() {
   if (!S.timer) return '';
@@ -252,7 +260,7 @@ function vPlay() {
   return `<div class="cols"><div>
     ${fin ? `<div class="banner"><span>Tournament finished</span><button class="btn ghost sm" data-act="resume">Resume</button></div>` : ''}
     <div class="card">
-      <div class="cardh"><h2>Round ${n}</h2><div class="acts">${!fin && !S.timer ? `<button class="btn ghost sm" data-act="tNew">Timer</button>` : ''}<button class="btn ghost sm" data-act="display" title="Big-screen view for a TV or projector">Display</button><button class="btn ghost sm" data-act="copyRound" data-r="${n - 1}">Copy</button></div></div>
+      <div class="cardh"><h2>Round ${n}</h2><div class="acts">${!fin && !S.timer ? `<button class="btn ghost sm" data-act="tNew">Timer</button>` : ''}<button class="btn ${S.live ? 'pri' : 'ghost'} sm" data-act="liveOpen" title="Link for everyone to follow scores on their phone">Share</button><button class="btn ghost sm" data-act="display" title="Big-screen view for a TV or projector">Display</button><button class="btn ghost sm" data-act="copyRound" data-r="${n - 1}">Copy</button></div></div>
       ${fin ? '' : timerBox()}
       <div class="matches">${cur.matches.map((m, i) => matchCard(n - 1, i, m)).join('')}</div>
       ${cur.byes.length ? `<div class="byes"><span>Sitting out</span>${cur.byes.map(chipName).join('')}</div>` : ''}
@@ -378,13 +386,116 @@ function scoreSheet(sh) {
 function sheetHTML() {
   const sh = ui.sheet;
   if (sh.type === 'calc') return calcSheet();
+  if (sh.type === 'live') return liveSheet();
   if (sh.type === 'player') return playerSheet(sh.id);
   if (sh.type === 'copy') return `<div class="ov" data-act="closeSheet"></div><div class="sheetbox" role="dialog" aria-modal="true"><div class="sh-h"><b>Copy this</b><button class="x" data-act="closeSheet" aria-label="Close">✕</button></div><div class="hint">Select all and copy, then paste into WhatsApp.</div><textarea id="copyBox" class="txt" rows="10" readonly>${esc(sh.text)}</textarea></div>`;
   if (sh.type === 'import') return `<div class="ov" data-act="closeSheet"></div><div class="sheetbox" role="dialog" aria-modal="true"><div class="sh-h"><b>Load backup</b><button class="x" data-act="closeSheet" aria-label="Close">✕</button></div><div class="hint">Paste a backup code from another device. This replaces what's on this device.</div><textarea id="importBox" class="txt" rows="8" placeholder="Paste backup code"></textarea><button class="btn pri block" data-act="doImport">Load</button></div>`;
   return scoreSheet(sh);
 }
 
+/* ---------------- live sharing ---------------- */
+const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 5 ? 'just now' : s < 60 ? `${s}s ago` : `${Math.floor(s / 60)}m ago`; };
+let pubTimer = null, pubBusy = false, pubAgain = false;
+function schedulePublish(delay = 600) {
+  clearTimeout(pubTimer);
+  pubTimer = setTimeout(doPublish, delay);
+}
+async function doPublish() {
+  if (!S.live) return;
+  if (pubBusy) { pubAgain = true; return; }
+  pubBusy = true; pubAgain = false;
+  const live = S.live;
+  try {
+    await publish(live, S);
+    ui.live = { status: 'ok', at: Date.now() };
+  } catch (e) {
+    ui.live = { status: 'err', at: ui.live.at, msg: String(e.message || e) };
+    if (/not allowed/i.test(ui.live.msg)) { toast('This live link belongs to another device'); }
+    else schedulePublish(8000); // offline or server hiccup: keep retrying quietly
+  }
+  pubBusy = false;
+  if (pubAgain) schedulePublish(0);
+  refreshLiveBits();
+}
+// Update the small status bits without re-rendering the whole page (keeps inputs focused).
+function refreshLiveBits() {
+  document.querySelectorAll('.livepill').forEach((el) => { el.classList.remove('ok', 'err', 'idle'); el.classList.add(ui.live.status); });
+  const st = $('[data-livestatus]'); if (st) st.innerHTML = liveStatusText();
+}
+function liveStatusText() {
+  if (ui.live.status === 'ok') return `<span class="dot ok"></span>Synced ${ago(ui.live.at)}`;
+  if (ui.live.status === 'err') return `<span class="dot err"></span>Not synced${ui.live.at ? ` since ${ago(ui.live.at)}` : ''}. Retrying when online`;
+  return `<span class="dot"></span>Connecting…`;
+}
+function liveSheet() {
+  const head = `<div class="ov" data-act="closeSheet"></div><div class="sheetbox" role="dialog" aria-modal="true" aria-label="Live link">
+    <div class="sh-h"><div><div class="sub">Live scores & standings</div><b>Share with everyone</b></div><button class="x" data-act="closeSheet" aria-label="Close">✕</button></div>`;
+  if (!S.live) return `${head}
+    <div class="hint">Everyone opens one link on their own phone and sees the current round, scores and standings update by themselves. Only this device can change scores.</div>
+    <button class="btn pri block big" data-act="liveStart">Create live link</button></div>`;
+  const url = liveUrl(S.live.code);
+  return `${head}
+    <input class="txt linkbox" id="liveLink" value="${esc(url)}" readonly aria-label="Live link">
+    <div class="row2"><button class="btn pri" data-act="liveCopy">Copy link</button><button class="btn" data-act="liveCopyWa">Copy WA message</button></div>
+    <div class="hint" data-livestatus>${liveStatusText()}</div>
+    <div class="hint">Viewers can't edit anything. The link stays the same if you start a new tournament with the same players.</div>
+    <button class="btn ghost danger block ${ui.confirm === 'liveStop' ? 'armed' : ''}" data-act="liveStop">${ui.confirm === 'liveStop' ? 'Tap again: link stops working for everyone' : 'Stop sharing'}</button></div>`;
+}
+function vLive() {
+  const v = ui.view;
+  const top = (sub) => `<header class="top"><div class="brand"><div class="ball"></div><div style="min-width:0"><h1>${esc(v.loaded ? S.setup.name : 'Padel live')}</h1><div class="sub">${sub}</div></div></div></header>`;
+  if (!v.loaded) {
+    const msg = v.missing ? `<h2>This live link isn't active</h2><p class="sub">The organizer may have stopped sharing, or the link is mistyped.</p>`
+      : v.failAt ? `<h2>Can't reach the scores</h2><p class="sub">Check your connection. Retrying…</p>` : `<h2>Loading live scores…</h2>`;
+    return `<div class="wrap">${top('Live')}<div class="narrow"><div class="card" style="text-align:center;padding:32px 18px">${msg}</div></div></div>`;
+  }
+  const n = S.rounds.length, cur = S.rounds[n - 1], fin = S.status === 'finished';
+  const stale = v.failAt && Date.now() - v.at > 20000;
+  const status = `<span class="livetag ${stale ? 'stale' : ''}"><span class="dot ${stale ? 'err' : 'ok'}"></span>${stale ? 'Reconnecting' : fin ? 'Final' : 'Live'}</span>`;
+  const sub = [fmtLabel(), n ? (fin ? 'Final' : 'Round ' + n) : 'Waiting to start'].join(' · ');
+  const ms = S.timer && !fin ? timerLeft() : null;
+  const roundCard = cur ? `<div class="card">
+      <div class="cardh"><h2>${fin ? 'Last round' : 'Round ' + n}</h2>${ms != null ? `<div class="vclock ${clockCls(ms)}" data-clock>${clockText(ms)}</div>` : ''}</div>
+      <div class="matches">${cur.matches.map((m, i) => matchCard(n - 1, i, m, true)).join('')}</div>
+      ${cur.byes.length ? `<div class="byes"><span>Sitting out</span>${cur.byes.map(chipName).join('')}</div>` : ''}
+    </div>` : `<div class="card" style="text-align:center;padding:28px 18px"><h2>Waiting for round 1</h2><p class="sub">${S.players.length} players registered. Scores show up here once it starts.</p></div>`;
+  const prev = S.rounds.slice(0, -1).map((r, i) => i).reverse();
+  return `<div class="wrap">${top(sub)}
+    <div class="livebar">${status}<span class="sub" data-viewago>Updated ${ago(v.at)}</span></div>
+    <div class="cols2"><div>${roundCard}
+      ${prev.length ? `<div class="label" style="margin-left:4px">Previous rounds</div>${prev.map((i) => prevRound(i, true)).join('')}` : ''}
+    </div><div>${standingsCard(false)}</div></div>
+    <div class="hint" style="text-align:center;margin-top:8px">View only · updates automatically</div>
+  </div>`;
+}
+let viewTimer = null;
+async function pollLive() {
+  clearTimeout(viewTimer);
+  const v = ui.view;
+  try {
+    const res = await fetchLive(LIVE, v.since);
+    if (!res) { v.loaded = false; v.missing = true; render(); }
+    else {
+      v.at = Date.now(); v.failAt = 0; v.missing = false;
+      if (!res.unchanged && res.state && valid(res.state)) {
+        S = normalize(res.state); v.since = res.updated_at; v.loaded = true;
+        if (ui.sheet && ui.sheet.type === 'player' && !S.players.some((p) => p.id === ui.sheet.id)) ui.sheet = null;
+        render();
+      } else if (!v.loaded) render();
+    }
+  } catch (e) {
+    v.failAt = Date.now(); if (!v.loaded) render();
+  }
+  viewTimer = setTimeout(pollLive, document.hidden ? 15000 : 4000);
+}
+
 function render() {
+  if (LIVE) {
+    $('#app').innerHTML = vLive();
+    $('#sheet').innerHTML = ui.sheet ? sheetHTML() : '';
+    document.body.style.overflow = ui.sheet ? 'hidden' : '';
+    return;
+  }
   if (isDisplay()) {
     $('#app').innerHTML = vDisplay(); $('#sheet').innerHTML = '';
     document.body.style.overflow = '';
@@ -417,6 +528,17 @@ function setScore(v) {
   if (sh.r === S.rounds.length - 1 && roundDone(r) && !ui.sheet) toast('Round complete. Tap Next round');
 }
 const A = {
+  liveOpen: () => { ui.sheet = { type: 'live' }; },
+  liveStart: () => { S.live = newLive(); ui.live = { status: 'idle', at: 0 }; save(); schedulePublish(0); },
+  liveCopy: () => { copyText(liveUrl(S.live.code), 'Link copied'); return 'skip'; },
+  liveCopyWa: () => { copyText(`🎾 ${S.setup.name}: live scores & standings\n${liveUrl(S.live.code)}`); return 'skip'; },
+  liveStop: () => {
+    confirmTap('liveStop', () => {
+      const live = S.live; delete S.live; save(); ui.sheet = null; ui.live = { status: 'idle', at: 0 };
+      stopLive(live).then(() => toast('Live link stopped')).catch(() => toast('Stopped here. The old link may keep showing the last scores'));
+    });
+    return 'skip';
+  },
   tab: (el) => { ui.tab = el.dataset.v; ui.confirm = null; window.scrollTo(0, 0); },
   seg: (el) => {
     const k = el.dataset.k, v = el.dataset.v;
@@ -504,11 +626,18 @@ const A = {
   newKeep: () => {
     confirmTap('newKeep', () => {
       const pls = S.players.map((p) => ({ ...p, active: true })); const st = { ...S.setup };
-      S = defaults(pls); S.setup = st; ui.tab = 'setup'; ui.filter = 'all'; save(); toast('New tournament ready');
+      const live = S.live;
+      S = defaults(pls); S.setup = st; if (live) S.live = live; ui.tab = 'setup'; ui.filter = 'all'; save(); toast('New tournament ready');
     });
     return 'skip';
   },
-  reset: () => { confirmTap('reset', () => { S = defaults(); ui.tab = 'setup'; ui.filter = 'all'; save(); toast('Everything cleared'); }); return 'skip'; },
+  reset: () => {
+    confirmTap('reset', () => {
+      if (S.live) stopLive(S.live).catch(() => {});
+      S = defaults(); ui.tab = 'setup'; ui.filter = 'all'; save(); toast('Everything cleared');
+    });
+    return 'skip';
+  },
   // timer
   tNew: () => { const d = S.setup.roundMin * 60000; S.timer = { dur: d, end: null, left: d }; save(); },
   tToggle: () => {
@@ -531,8 +660,10 @@ function primeAudio() {
   try { const C = window.AudioContext || window.webkitAudioContext; if (C && !beep.ctx) { beep.ctx = new C(); beep.ctx.resume && beep.ctx.resume(); } } catch (e) {}
 }
 
+const VIEW_ACTS = new Set(['player', 'closeSheet', 'seg', 'openR', 'copyStand', 'copyRound']);
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]'); if (!el || el.disabled) return;
+  if (LIVE && !VIEW_ACTS.has(el.dataset.act)) return;
   const f = A[el.dataset.act]; if (!f) return;
   if (f(el) !== 'skip') render();
 });
@@ -570,7 +701,7 @@ document.addEventListener('keydown', (e) => {
 });
 // Keep several tabs/windows in sync (e.g. laptop controls + projector display window).
 window.addEventListener('storage', (e) => {
-  if (e.key !== KEY || !e.newValue) return;
+  if (LIVE || e.key !== KEY || !e.newValue) return;
   try {
     const o = JSON.parse(e.newValue);
     if (!valid(o)) return;
@@ -584,7 +715,16 @@ window.addEventListener('storage', (e) => {
 window.addEventListener('hashchange', render);
 
 render();
-window.__padel = { get S() { return S; }, A };
+window.__padel = { get S() { return S; }, A, ui };
+if (LIVE) {
+  pollLive();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLive(); });
+  setInterval(() => { const el = $('[data-viewago]'); if (el && ui.view.at) el.textContent = 'Updated ' + ago(ui.view.at); }, 1000);
+} else if (S.live) {
+  schedulePublish(0); // catch up on anything changed while offline
+}
+window.addEventListener('online', () => { if (!LIVE && S.live) schedulePublish(0); else if (LIVE) pollLive(); });
+setInterval(() => { if (!LIVE && S.live && ui.sheet && ui.sheet.type === 'live') refreshLiveBits(); }, 5000);
 
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));

@@ -12,10 +12,11 @@ Americano and Mexicano padel tournament scorer. Works on phone and laptop, insta
 - Points calculator from booking time.
 - Paste a player list straight from WhatsApp (`Matt M`, `Sari cewek`, `Budi L`, `Rina P`).
 - Standings with Men/Women filter, player detail (partners, match log), podium at the end.
+- **Live link** (`/?live=CODE`): tap Share in the round card, send the link, everyone follows scores and standings on their own phone. View only, refreshes every ~4s. Stored in Supabase (`padel-scorer` project, table `padel_live`, written only through the token-checked `live_publish` RPC). Links unused for 30 days are cleaned up.
 - **Display mode** (`/#display`) for a TV or projector. Syncs live with the controlling tab on the same laptop.
 - Laptop: type scores on the keyboard, Enter to save, Esc to close.
 - Copy rounds and standings as WhatsApp text. Backup code to move a tournament between devices.
-- Data stays in the browser (localStorage). No account, no server.
+- Data stays in the browser (localStorage). No account. The only server use is the optional live link.
 
 ## Develop
 
