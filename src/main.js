@@ -1,7 +1,7 @@
 import './style.css';
 import {
   defaults, valid, normalize, uid, fmt, isActive, roundDone, stats, ranked, nextRound,
-  calcPoints, playerLog, roundText, standText, cleanName, parseLine, PACE,
+  calcPoints, playerLog, roundText, standText, cleanName, parseLine, PACE, splitCourts,
 } from './engine.js';
 
 const KEY = 'padel_scorer_v1';
@@ -94,7 +94,7 @@ function manualCopy(t) {
   setTimeout(() => { const el = $('#copyBox'); if (el) { el.focus(); el.select(); } }, 60);
 }
 const dupe = (n, exceptId) => S.players.some((p) => p.id !== exceptId && p.name.toLowerCase() === n.toLowerCase());
-const fmtLabel = () => (S.setup.mixed ? 'Mixed ' : '') + (S.setup.format === 'americano' ? 'Americano' : 'Mexicano');
+const fmtLabel = () => (S.setup.mixed ? 'Mixed ' : S.setup.split ? 'Split ' : '') + (S.setup.format === 'americano' ? 'Americano' : 'Mexicano');
 const used = (id) => S.rounds.some((r) => r.byes.includes(id) || r.matches.some((m) => m.a.includes(id) || m.b.includes(id)));
 
 function genRound() {
@@ -107,6 +107,16 @@ function genRound() {
 
 function capHint() {
   const act = S.players.filter(isActive), C = S.setup.courts;
+  if (S.setup.split) {
+    const m = act.filter((p) => p.g === 'M').length, f = act.length - m;
+    if (m < 4 && f < 4) return ['warn', 'Split needs at least 4 men or 4 women.'];
+    const [cm, cf] = splitCourts(m, f, C);
+    const side = (lbl, n, c) => (c ? `${lbl}: ${c} court${c > 1 ? 's' : ''}, ${c * 4} play${n - c * 4 ? `, ${n - c * 4} sit out` : ''}` : n ? `${lbl}: ${n} can't play (need 4)` : '');
+    let t = [side('Men', m, cm), side('Women', f, cf)].filter(Boolean).join(' · ');
+    if (cm + cf < C) t += ` · ${C - cm - cf} court${C - cm - cf > 1 ? 's' : ''} unused`;
+    const bad = (m && !cm) || (f && !cf);
+    return [bad ? 'warn' : (m - cm * 4) || (f - cf * 4) ? '' : 'ok', t];
+  }
   if (!S.setup.mixed) {
     const n = act.length;
     if (n < 4) return ['warn', `Add at least ${4 - n} more player${4 - n > 1 ? 's' : ''} to start.`];
@@ -158,7 +168,8 @@ function vSetup() {
     ${seg('format', [['americano', 'Americano'], ['mexicano', 'Mexicano']], s.format, locked)}
     <div class="hint">${s.format === 'americano' ? 'Partners and opponents rotate every round so everyone plays with everyone.' : 'Round 1 is random. After that pairs follow the standings: 1+4 vs 2+3 on court 1, 5+8 vs 6+7 on court 2, and so on.'}</div>
     <div class="label">Teams</div>
-    ${seg('mixed', [['0', 'Open'], ['1', 'Mixed · 1 M + 1 F']], s.mixed ? '1' : '0', locked)}
+    ${seg('mixed', [['0', 'Open'], ['1', 'Mixed'], ['2', 'Split']], s.mixed ? '1' : s.split ? '2' : '0', locked)}
+    <div class="hint">${s.mixed ? 'Every team is 1 M + 1 F.' : s.split ? 'Men only play men, women only play women. Separate standings for each.' : 'Anyone partners anyone.'}</div>
     <div class="label">Scoring</div>
     ${seg('scoring', [['fixed', 'Fixed total points'], ['timed', 'Timed']], s.scoring, locked)}
     ${lockNote}
@@ -216,7 +227,8 @@ function matchCard(ri, mi, m, ro) {
     return ro ? `<div class="team ${win ? 'win' : ''}">${inner}</div>`
       : `<button class="team ${win ? 'win' : ''}" data-act="score" data-r="${ri}" data-m="${mi}" data-side="${side}" aria-label="Enter score for ${esc(t.map(name).join(' and '))}">${inner}</button>`;
   };
-  return `<div class="match"><div class="mhead"><span>Court ${m.court}</span>${has ? '<span class="done">Done</span>' : ''}</div>${team(m.a, 'a', m.sa, wa)}<div class="vs">VS</div>${team(m.b, 'b', m.sb, wb)}</div>`;
+  const tag = S.setup.split ? ` · ${P(m.a[0]).g === 'F' ? 'Women' : 'Men'}` : '';
+  return `<div class="match"><div class="mhead"><span>Court ${m.court}${tag}</span>${has ? '<span class="done">Done</span>' : ''}</div>${team(m.a, 'a', m.sa, wa)}<div class="vs">VS</div>${team(m.b, 'b', m.sb, wb)}</div>`;
 }
 function prevRound(i) {
   const r = S.rounds[i], open = ui.openRounds[i];
@@ -264,10 +276,26 @@ function standTable(list, ro) {
   const rows = list.map((s, i) => `<tr class="${i === 0 && s.mp ? 'r1' : ''} ${ro ? '' : 'click'}" ${ro ? '' : `data-act="player" data-id="${s.id}"`}><td class="rk">${i + 1}</td><td class="nm"><span class="pl">${gi(s)}<span class="nm">${esc(s.name)}</span></span></td><td class="pts">${fmt(s.total)}${s.bonus ? `<span class="bon">+${fmt(s.bonus)} sit</span>` : ''}</td><td>${s.mp}</td><td class="hide-s">${s.w}-${s.d}-${s.l}</td><td>${s.diff > 0 ? '+' : ''}${s.diff}</td></tr>`).join('');
   return list.length ? `<table><thead><tr><th class="l">#</th><th class="l">Player</th><th>Pts</th><th>MP</th><th class="hide-s">W-D-L</th><th>+/−</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">No players</div>';
 }
+// Split mode with the All filter: one ranked section per gender, since they never play each other.
+const splitView = () => S.setup.split && ui.filter === 'all';
+const genderList = (g) => ranked(stats(S)).filter((s) => s.g === g && (isActive(P(s.id)) || s.mp > 0 || s.byes > 0));
+function splitSections(ro, pod) {
+  return [['M', 'Men'], ['F', 'Women']].map(([g, l]) => {
+    const list = genderList(g);
+    if (!list.length) return '';
+    return `<div class="label">${l}</div>${pod && list.length >= 2 ? podium(list) : ''}${standTable(list, ro)}`;
+  }).join('');
+}
 function standingsCard(side) {
   const list = standingList();
   const hasM = S.players.some((p) => p.g === 'M'), hasF = S.players.some((p) => p.g === 'F');
   const nd = S.rounds.filter(roundDone).length, fin = S.status === 'finished';
+  if (splitView()) return `<div class="card">
+    <div class="cardh"><h2>Standings</h2><button class="btn ghost sm" data-act="copyStand">Copy</button></div>
+    <div class="sub" style="margin:-6px 0 12px">${nd ? `After ${nd} completed round${nd > 1 ? 's' : ''} · tap a player for details` : 'No completed rounds yet'}</div>
+    ${hasM && hasF ? `<div style="margin-bottom:4px">${seg('filter', [['all', 'Both'], ['M', 'Men'], ['F', 'Women']], ui.filter, false)}</div>` : ''}
+    ${splitSections(false, fin && !side && nd)}
+  </div>`;
   return `<div class="card">
     <div class="cardh"><h2>Standings</h2><button class="btn ghost sm" data-act="copyStand">Copy</button></div>
     <div class="sub" style="margin:-6px 0 12px">${nd ? `After ${nd} completed round${nd > 1 ? 's' : ''} · tap a player for details` : 'No completed rounds yet'}</div>
@@ -288,7 +316,7 @@ function vDisplay() {
       ${ms != null && S.status !== 'finished' ? `<div class="clock ${clockCls(ms)}" data-clock>${clockText(ms)}</div>` : ''}</div>
     <div class="disp-body">
       <div>${cur ? `<div class="matches">${cur.matches.map((m, i) => matchCard(n - 1, i, m, true)).join('')}</div>${cur.byes.length ? `<div class="byes"><span>Sitting out</span>${cur.byes.map(chipName).join('')}</div>` : ''}` : '<div class="card empty">No rounds yet</div>'}</div>
-      <div class="card"><div class="cardh"><h2>Standings</h2><span class="sub">${nd ? `after ${nd} round${nd > 1 ? 's' : ''}` : ''}</span></div>${standTable(list, true)}</div>
+      <div class="card"><div class="cardh"><h2>Standings</h2><span class="sub">${nd ? `after ${nd} round${nd > 1 ? 's' : ''}` : ''}</span></div>${S.setup.split ? splitSections(true, false) : standTable(list, true)}</div>
     </div>
     <button class="btn ghost sm disp-exit" data-act="exitDisplay">Exit display</button>
   </div>`;
@@ -394,7 +422,7 @@ const A = {
     const k = el.dataset.k, v = el.dataset.v;
     if (k === 'filter') ui.filter = v;
     else if (k === 'pace') ui.calc.pace = v;
-    else if (k === 'mixed') S.setup.mixed = v === '1';
+    else if (k === 'mixed') { S.setup.mixed = v === '1'; S.setup.split = v === '2'; }
     else { S.setup[k] = v; if (k === 'scoring' && v === 'timed' && S.setup.bye === 'half') S.setup.bye = 'avg'; }
     save();
   },
@@ -420,7 +448,8 @@ const A = {
   pact: (el) => { const p = P(el.dataset.id); p.active = !isActive(p); save(); toast(p.active ? `${p.name} is back in from next round` : `${p.name} withdrawn from next round`); },
   start: () => {
     const act = S.players.filter(isActive), m = act.filter((p) => p.g === 'M').length, f = act.length - m;
-    if (!S.setup.mixed && act.length < 4) { toast('Need at least 4 players'); return; }
+    if (S.setup.split && m < 4 && f < 4) { toast('Split needs at least 4 men or 4 women'); return; }
+    if (!S.setup.mixed && !S.setup.split && act.length < 4) { toast('Need at least 4 players'); return; }
     if (S.setup.mixed && (m < 2 || f < 2)) { toast('Mixed needs at least 2 M and 2 F'); return; }
     S.status = 'playing';
     if (genRound()) { ui.tab = 'play'; window.scrollTo(0, 0); } else S.status = 'setup';
@@ -458,7 +487,10 @@ const A = {
   },
   openR: (el) => { const i = +el.dataset.r; ui.openRounds[i] = !ui.openRounds[i]; },
   copyRound: (el) => { copyText(roundText(S, +el.dataset.r, name)); return 'skip'; },
-  copyStand: () => { copyText(standText(S, standingList(), ui.filter)); return 'skip'; },
+  copyStand: () => {
+    copyText(splitView() ? ['M', 'F'].map((g) => genderList(g)).filter((l) => l.length).map((l) => standText(S, l, l[0].g)).join('\n\n') : standText(S, standingList(), ui.filter));
+    return 'skip';
+  },
   copyBackup: () => { copyText(JSON.stringify(S), 'Backup code copied'); return 'skip'; },
   openImport: () => { ui.sheet = { type: 'import' }; },
   doImport: () => {

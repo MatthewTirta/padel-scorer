@@ -18,7 +18,7 @@ export function shuffle(arr, rnd = Math.random) {
 export function defaults(players) {
   return {
     v: VERSION,
-    setup: { name: 'Padel Night', format: 'americano', mixed: false, points: 24, courts: 2, scoring: 'fixed', bye: 'avg', roundMin: 12 },
+    setup: { name: 'Padel Night', format: 'americano', mixed: false, split: false, points: 24, courts: 2, scoring: 'fixed', bye: 'avg', roundMin: 12 },
     players: players || [],
     rounds: [],
     status: 'setup',
@@ -59,6 +59,7 @@ export function normalize(o) {
   if (!['fixed', 'timed'].includes(o.setup.scoring)) o.setup.scoring = 'fixed';
   if (!['avg', 'half', 'zero'].includes(o.setup.bye)) o.setup.bye = 'avg';
   o.setup.mixed = !!o.setup.mixed;
+  o.setup.split = !!o.setup.split && !o.setup.mixed;
   if (!['setup', 'playing', 'finished'].includes(o.status)) o.status = o.rounds.length ? 'playing' : 'setup';
   if (!o.seed) o.seed = uid();
   if (!isObj(o.timer)) o.timer = null;
@@ -241,8 +242,23 @@ function mexMixed(mR, wR, nC, H) {
   return ms;
 }
 
+// Split mode: men and women play in separate pools. Hand out courts one at a time to the pool
+// with the smallest share of its players on court (ties: more players waiting), so a small
+// group still gets a court instead of watching the bigger one play every round.
+export function splitCourts(m, f, C) {
+  const cap = [Math.floor(m / 4), Math.floor(f / 4)], n = [m, f], c = [0, 0];
+  for (let k = 0; k < C; k++) {
+    const open = [0, 1].filter((i) => c[i] < cap[i]);
+    if (!open.length) break;
+    open.sort((x, y) => (4 * c[x]) / n[x] - (4 * c[y]) / n[y] || n[y] - 4 * c[y] - (n[x] - 4 * c[x]) || x - y);
+    c[open[0]]++;
+  }
+  return c;
+}
+
 export function courtsInUse(S) {
   const act = S.players.filter(isActive), C = S.setup.courts;
+  if (S.setup.split) { const m = act.filter((p) => p.g === 'M').length; const [cm, cf] = splitCourts(m, act.length - m, C); return cm + cf; }
   if (!S.setup.mixed) return Math.min(C, Math.floor(act.length / 4));
   const m = act.filter((p) => p.g === 'M').length, f = act.length - m;
   return Math.min(C, Math.floor(m / 2), Math.floor(f / 2));
@@ -257,7 +273,21 @@ export function nextRound(S, rnd = Math.random) {
   const C = S.setup.courts;
   const mex = S.setup.format === 'mexicano' && S.rounds.length > 0;
   let ms, byes;
-  if (!S.setup.mixed) {
+  if (S.setup.split) {
+    const men = act.filter((p) => p.g === 'M').map((p) => p.id), wo = act.filter((p) => p.g === 'F').map((p) => p.id);
+    const cs = splitCourts(men.length, wo.length, C);
+    if (!cs[0] && !cs[1]) return { ok: false, error: 'Split needs at least 4 men or 4 women active' };
+    ms = []; byes = [];
+    [men, wo].forEach((ids, i) => {
+      const nC = cs[i];
+      if (!nC) return; // fewer than 4 of this gender: nobody to play against, so not counted as a bye
+      const b = pickByes(ids, ids.length - nC * 4, H, rnd);
+      byes.push(...b);
+      const pl = ids.filter((x) => !b.includes(x));
+      if (mex) ms.push(...mexOpen(pl.sort((a, b2) => rk(a) - rk(b2)), nC, H));
+      else ms.push(...((S.setup.format === 'americano' && circleOpen(S, pl, nC, H, rnd)) || randOpen(pl, nC, H, rnd).ms));
+    });
+  } else if (!S.setup.mixed) {
     const ids = act.map((p) => p.id);
     const nC = Math.min(C, Math.floor(ids.length / 4));
     if (nC < 1) return { ok: false, error: 'Need at least 4 active players' };
@@ -283,7 +313,14 @@ export const PACE = { casual: 40, normal: 33, fast: 27 };
 export function roundsTarget(S) {
   const act = S.players.filter(isActive), C = S.setup.courts, m = act.filter((p) => p.g === 'M').length, f = act.length - m, n = act.length;
   let nC = 0, target = 0, why = '';
-  if (!S.setup.mixed) {
+  if (S.setup.split) {
+    const cs = splitCourts(m, f, C);
+    nC = cs[0] + cs[1];
+    if (nC && S.setup.format === 'americano') {
+      target = Math.max(...[[m, cs[0]], [f, cs[1]]].map(([k, c]) => (c ? Math.ceil((k * (k - 1)) / (c * 4)) : 0)));
+      why = `${target} rounds lets every man partner every man, and every woman every woman, once`;
+    }
+  } else if (!S.setup.mixed) {
     nC = Math.min(C, Math.floor(n / 4));
     if (nC && S.setup.format === 'americano') { target = Math.ceil((n * (n - 1)) / (nC * 4)); why = `${target} rounds lets all ${n} players partner everyone once`; }
   } else {

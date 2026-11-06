@@ -6,7 +6,7 @@ Americano and Mexicano padel tournament scorer. Works on phone and laptop, insta
 
 - **Americano**: partners rotate so everyone plays with everyone. With no one sitting out, follows a perfect rotation (no repeated partner for n−1 rounds).
 - **Mexicano**: round 1 random, then 1+4 vs 2+3 by standings per court, avoids last round's partner.
-- **Open or Mixed** (1 M + 1 F per team).
+- **Open, Mixed** (1 M + 1 F per team) **or Split** (men only play men, women only play women, separate standings; courts shared fairly between the two sides).
 - **Fixed points** (enter one side, the other fills in) or **timed** rounds with a countdown and beep.
 - Fair sit-outs for uneven numbers, with compensation (own average, half points, or none).
 - Points calculator from booking time.

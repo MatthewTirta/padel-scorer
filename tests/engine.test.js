@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { defaults, nextRound, stats, ranked, valid, normalize, pairKey, parseLine, calcPoints, playerLog, roundDone } from '../src/engine.js';
+import { splitCourts, defaults, nextRound, stats, ranked, valid, normalize, pairKey, parseLine, calcPoints, playerLog, roundDone } from '../src/engine.js';
 
 const mk = (n, mixed = false) => {
   const S = defaults();
@@ -157,5 +157,65 @@ describe('helpers', () => {
     const log = playerLog(S, 'p00');
     expect(log.length).toBe(5);
     expect(log.filter((x) => x.bye).length).toBe(1);
+  });
+});
+
+describe('split by gender', () => {
+  const mkSplit = (m, f, courts) => {
+    const S = defaults(); S.setup.split = true; S.setup.courts = courts;
+    for (let i = 0; i < m; i++) S.players.push({ id: 'm' + String(i).padStart(2, '0'), name: 'M' + i, g: 'M', active: true });
+    for (let i = 0; i < f; i++) S.players.push({ id: 'f' + String(i).padStart(2, '0'), name: 'F' + i, g: 'F', active: true });
+    return S;
+  };
+  const g = (S, id) => S.players.find((p) => p.id === id).g;
+
+  it('courts go to whichever side has more waiting players', () => {
+    expect(splitCourts(8, 4, 3)).toEqual([2, 1]);
+    expect(splitCourts(8, 8, 3)).toEqual([2, 1]);
+    expect(splitCourts(12, 4, 2)).toEqual([1, 1]);
+    expect(splitCourts(12, 4, 4)).toEqual([3, 1]);
+    expect(splitCourts(3, 8, 3)).toEqual([0, 2]);
+    expect(splitCourts(0, 0, 2)).toEqual([0, 0]);
+  });
+
+  it('every match is all-men or all-women, nobody double-booked', () => {
+    for (const fmt of ['americano', 'mexicano']) {
+      const S = mkSplit(9, 6, 3); S.setup.format = fmt;
+      play(S, 8, () => [13, 11]);
+      S.rounds.forEach((r) => {
+        const seen = new Set();
+        r.matches.forEach((m) => {
+          const gs = new Set([...m.a, ...m.b].map((id) => g(S, id)));
+          expect(gs.size).toBe(1);
+          [...m.a, ...m.b].forEach((x) => { expect(seen.has(x)).toBe(false); seen.add(x); });
+        });
+        r.byes.forEach((x) => expect(seen.has(x)).toBe(false));
+      });
+    }
+  });
+
+  it('8 men + 8 women on 4 courts: perfect partner rotation in each pool', () => {
+    const S = mkSplit(8, 8, 4);
+    play(S, 7);
+    const c = partnerCounts(S);
+    expect(Object.values(c).every((v) => v === 1)).toBe(true);
+    expect(Object.keys(c).length).toBe(2 * 28);
+  });
+
+  it('a side with fewer than 4 sits out entirely but does not block the other', () => {
+    const S = mkSplit(8, 3, 2);
+    const r = nextRound(S);
+    expect(r.ok).toBe(true);
+    expect(r.round.matches.length).toBe(2);
+    expect(r.round.byes.length).toBe(0);
+  });
+
+  it('refuses when neither side has 4', () => {
+    expect(nextRound(mkSplit(3, 3, 2)).ok).toBe(false);
+  });
+
+  it('normalize clears split when mixed is on', () => {
+    const S = mkSplit(4, 4, 2); S.setup.mixed = true;
+    expect(normalize(S).setup.split).toBe(false);
   });
 });
